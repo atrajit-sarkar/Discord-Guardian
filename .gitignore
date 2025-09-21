@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+.env
+.venv/
+venv/
+.env.*
+/.pytest_cache/
+
+# VS Code
+.vscode/
+
+# Google Cloud
+*.json
+
+# Logs
+logs/
+*.log
