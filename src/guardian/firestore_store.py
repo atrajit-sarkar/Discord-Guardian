@@ -74,6 +74,24 @@ class Store:
         transaction = self.db.transaction()
         return do_txn(transaction, doc_ref)
 
+    def ensure_min_hearts(self, user_id: str, min_hearts: int) -> int:
+        """Ensure the user's hearts are at least min_hearts. Returns resulting hearts.
+        Does not lower hearts if they are already higher."""
+        doc_ref = self._user_doc(user_id)
+
+        @firestore.transactional
+        def do_txn(transaction, ref):
+            snap = ref.get(transaction=transaction)
+            data = snap.to_dict() or {}
+            current = int(data.get("hearts", 0))
+            if current >= min_hearts:
+                return current
+            transaction.set(ref, {"hearts": int(min_hearts), "updated_at": datetime.now(timezone.utc).isoformat()}, merge=True)
+            return int(min_hearts)
+
+        transaction = self.db.transaction()
+        return do_txn(transaction, doc_ref)
+
     def increment_flag(self, user_id: str) -> int:
         doc_ref = self._user_doc(user_id)
 

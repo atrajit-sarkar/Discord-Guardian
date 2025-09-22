@@ -42,6 +42,8 @@ LOG_LEVEL=INFO
 ALLOWED_GUILD_ID=123456789012345678
 # Optional: additional admin role IDs (comma/space separated)
 ADMIN_ROLE_IDS=123456789012345678, 987654321098765432
+# Special users file (optional): path to JSON file; defaults to ./specialuser.json
+SPECIAL_USERS_FILE=E:\\CodingWorld\\Pyhton Projects\\PlayGround\\DiscordBotdevelopment\\Discord-Guardian\\specialuser.json
 ```
 
 3. Discord Developer Portal configuration
@@ -90,6 +92,20 @@ python -m guardian.main
 - Only flagged message content is stored
 - Non-flagged messages are never persisted; only counters are updated
 - When a member is kicked (0 hearts), their user document and stored flags are deleted from Firestore for privacy.
+
+## Special users
+- Users listed in `specialuser.json` (or file at `SPECIAL_USERS_FILE`) are exempt from penalties and kicks.
+- Only positive heart changes (daily bonus, advice, solved, awards) are applied to them.
+- On startup, the bot ensures their hearts are at least the configured `hearts` value (if provided). Existing higher values are preserved and not overwritten.
+- If `roles` are specified for a special user, the bot will add those existing roles to the member on startup.
+
+Example `specialuser.json`:
+```json
+[
+  { "id": "123456789012345678", "hearts": 200, "roles": ["VIP", "Helper"] },
+  { "id": "223344556677889900" }
+]
+```
 
 ## Troubleshooting
 - Ensure `MESSAGE CONTENT INTENT` is enabled in the Developer Portal

@@ -26,6 +26,10 @@ class GuardianClient(discord.Client):
         self.config = config
         self.logger = logging.getLogger("guardian")
         self.tree = app_commands.CommandTree(self)
+        # Build quick lookup for special users and special role IDs
+        specials = (self.config.special_users or [])
+        self._special_ids = set(str(u.get("id")) for u in specials if u.get("id"))
+        self._special_role_ids = set(str(u.get("roleId")) for u in specials if u.get("roleId"))
 
     def is_admin(self, member: discord.Member) -> bool:
         # Admin if they have Administrator permission OR any of the configured admin roles
@@ -48,12 +52,77 @@ class GuardianClient(discord.Client):
                 self.logger.info(f"Skipping guild '{guild.name}' ({guild.id}) due to ALLOWED_GUILD_ID restriction")
                 continue
             await self.ensure_roles(guild)
+            # Apply special user startup hearts and roles
+            await self.apply_specials_in_guild(guild)
             # Sync slash commands per guild for faster availability
             try:
                 await self.tree.sync(guild=guild)
             except Exception as e:
                 self.logger.warning(f"Slash command sync failed for {guild.name}: {e}")
         self.logger.info("Guardian is ready.")
+
+    def is_special(self, member: discord.Member) -> bool:
+        if str(member.id) in self._special_ids:
+            return True
+        if self._special_role_ids:
+            for r in member.roles:
+                if str(r.id) in self._special_role_ids:
+                    return True
+        return False
+
+    async def apply_specials_in_guild(self, guild: discord.Guild):
+        # Ensure minimum hearts and optional roles for special users and members with special roles
+        cfg = self.config
+        specials = cfg.special_users or []
+        if not specials:
+            return
+        # Build per-rule application: either user id or roleId
+        for su in specials:
+            uid = str(su.get("id") or "").strip()
+            rid = str(su.get("roleId") or "").strip()
+            targets: list[discord.Member] = []
+            if uid:
+                try:
+                    member = guild.get_member(int(uid)) or await guild.fetch_member(int(uid))
+                    if member:
+                        targets.append(member)
+                except Exception:
+                    pass
+            elif rid:
+                # Collect all members with role rid
+                role_obj = guild.get_role(int(rid))
+                if role_obj:
+                    targets = list(role_obj.members)
+            # Apply settings for targets
+            for member in targets:
+                key = f"{guild.id}:{member.id}"
+                self.store.get_or_create_user(key, str(member), cfg.heart_start, guild_id=str(guild.id))
+                if isinstance(su.get("hearts"), (int, float)):
+                    try:
+                        self.store.ensure_min_hearts(key, int(su["hearts"]))
+                    except Exception as e:
+                        self.logger.debug(f"Failed ensure_min_hearts for {member.id}: {e}")
+                roles = su.get("roles")
+                if isinstance(roles, list) and roles:
+                    await self.assign_configured_roles(member, roles)
+
+    async def assign_configured_roles(self, member: discord.Member, roles: list):
+        guild = member.guild
+        # roles can be IDs or names
+        to_add: list[discord.Role] = []
+        existing_by_name = {r.name: r for r in guild.roles}
+        existing_by_id = {str(r.id): r for r in guild.roles}
+        for r in roles:
+            r_str = str(r)
+            role_obj = existing_by_id.get(r_str) or existing_by_name.get(r_str)
+            if role_obj:
+                to_add.append(role_obj)
+        if not to_add:
+            return
+        try:
+            await member.add_roles(*to_add, reason="Guardian special user role assignment")
+        except Exception as e:
+            self.logger.debug(f"Failed to assign special roles to {member.display_name}: {e}")
 
     async def ensure_roles(self, guild: discord.Guild):
         needed = set(ordered_roles())
@@ -176,7 +245,7 @@ class GuardianClient(discord.Client):
             if role_name:
                 store.update_user(user_key, {"role": role_name})
 
-        # Analyze content with Gemini
+    # Analyze content with Gemini
         analysis = analyze_message(cfg.gemini_api_key, message.content)
         flagged = analysis.get("flagged", False)
         reasons = analysis.get("reasons", [])
@@ -186,7 +255,10 @@ class GuardianClient(discord.Client):
 
         hearts_now: Optional[int] = None
 
-        if flagged:
+        # Special users: do not penalize or record flags; only allow positive increases as usual
+        is_special = str(message.author.id) in self._special_ids
+
+        if flagged and not is_special:
             # Deduct hearts and record flag; store only flagged message content
             store.record_flag(user_key, {
                 "guild_id": str(message.guild.id),
@@ -300,8 +372,8 @@ class GuardianClient(discord.Client):
         if role_name:
             store.update_user(user_key, {"role": role_name})
 
-        # Kick if hearts are zero
-        if hearts_now <= 0:
+        # Kick if hearts are zero (not for special users)
+        if hearts_now <= 0 and not is_special:
             await self.maybe_kick(message.author, reason="Guardian: 0 hearts")
 
 
@@ -395,6 +467,9 @@ def main():
             return await interaction.followup.send("You cannot penalize yourself via command.", ephemeral=True)
         if cfg.allowed_guild_id and str(interaction.guild.id) != str(cfg.allowed_guild_id):
             return await interaction.followup.send("This bot is restricted to a specific server.")
+        # Block penalizing special users
+        if client.is_special(member):
+            return await interaction.followup.send("This member is exempt from penalties (special user).", ephemeral=True)
         user_key = f"{interaction.guild.id}:{member.id}"
         store.get_or_create_user(user_key, str(member), cfg.heart_start, guild_id=str(interaction.guild.id))
         hearts_now = store.add_hearts(user_key, -abs(int(amount)))
