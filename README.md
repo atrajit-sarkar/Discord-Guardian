@@ -40,6 +40,8 @@ HEART_PROBLEM_SOLVED=10
 LOG_LEVEL=INFO
 # Restrict bot to a single server (guild) ID
 ALLOWED_GUILD_ID=123456789012345678
+# Optional: additional admin role IDs (comma/space separated)
+ADMIN_ROLE_IDS=123456789012345678, 987654321098765432
 ```
 
 3. Discord Developer Portal configuration
@@ -101,6 +103,27 @@ python -m guardian.main
 - `/leaderboard` – Show top hearts in the current server
 - `/award <member> <amount>` – Admin only: add hearts
 - `/penalize <member> <amount>` – Admin only: deduct hearts
+
+## Roles configuration
+- The bot reads role thresholds and colors from `roles.json` at the project root:
+```json
+{
+  "roles": [
+    { "name": "Legends",  "minHearts": 500, "color": "#E5C233" },
+    { "name": "pro",      "minHearts": 250, "color": "#1ABC9C" },
+    { "name": "Guildster", "minHearts": 100, "color": "#9B59B6" },
+    { "name": "Noob",     "minHearts": 0,   "color": "#95A5A6" }
+  ]
+}
+```
+- On startup, the bot auto-creates any missing roles with the configured names and colors.
+- Change this file to add or adjust roles; the bot will pick them up on restart.
+
+## Admins
+- Admins are users who either:
+  - Have the Discord `Administrator` permission, or
+  - Have any role whose ID is listed in `ADMIN_ROLE_IDS`.
+- These admins can run `/award` and `/penalize`.
 
 Troubleshooting slash commands
 - Make sure the invite URL includes the `applications.commands` scope.

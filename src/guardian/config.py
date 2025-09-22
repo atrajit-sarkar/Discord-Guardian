@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import List, Optional
 import os
 from dotenv import load_dotenv
 
@@ -16,6 +17,7 @@ class Config:
     heart_problem_solved: int = int(os.getenv("HEART_PROBLEM_SOLVED", "10"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
     allowed_guild_id: str | None = os.getenv("ALLOWED_GUILD_ID")
+    admin_role_ids: List[str] = None  # populated below
 
 
 def get_config() -> Config:
@@ -25,4 +27,14 @@ def get_config() -> Config:
         raise RuntimeError("DISCORD_TOKEN is not set in environment/.env")
     if not gemini_api_key:
         raise RuntimeError("GEMINI_API_KEY is not set in environment/.env")
-    return Config(discord_token=discord_token, gemini_api_key=gemini_api_key)
+    cfg = Config(discord_token=discord_token, gemini_api_key=gemini_api_key)
+    # Parse admin role IDs (comma or space separated)
+    raw = os.getenv("ADMIN_ROLE_IDS", "").strip()
+    ids: List[str] = []
+    if raw:
+        for part in raw.replace("\n", ",").replace(" ", ",").split(","):
+            p = part.strip()
+            if p:
+                ids.append(p)
+    cfg.admin_role_ids = ids
+    return cfg

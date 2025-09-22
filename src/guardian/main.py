@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 
 from .config import get_config
-from .roles import role_for_hearts, ordered_roles
+from .roles import role_for_hearts, ordered_roles, role_color
 from .gemini_client import analyze_message
 from .firestore_store import Store
 
@@ -26,6 +26,18 @@ class GuardianClient(discord.Client):
         self.config = config
         self.logger = logging.getLogger("guardian")
         self.tree = app_commands.CommandTree(self)
+
+    def is_admin(self, member: discord.Member) -> bool:
+        # Admin if they have Administrator permission OR any of the configured admin roles
+        if member.guild_permissions.administrator:
+            return True
+        ids = set(self.config.admin_role_ids or [])
+        if not ids:
+            return False
+        for r in member.roles:
+            if str(r.id) in ids:
+                return True
+        return False
 
     async def on_ready(self):
         self.logger.info(f"Logged in as {self.user} (id={self.user.id})")
@@ -49,15 +61,54 @@ class GuardianClient(discord.Client):
         for name in ordered_roles():
             if name not in existing:
                 try:
-                    # Create role with a distinct color (choose among a few presets)
-                    preset_colors = [discord.Color.blue(), discord.Color.green(), discord.Color.gold(), discord.Color.purple()]
-                    color = preset_colors[abs(hash(name)) % len(preset_colors)]
-                    await guild.create_role(name=name, colour=color, reason="Guardian auto-setup")
+                    # Create role using color from roles.json if available
+                    color_hex = role_color(name)
+                    colour = discord.Color(value=color_hex) if isinstance(color_hex, int) else discord.Color.purple()
+                    await guild.create_role(name=name, colour=colour, reason="Guardian auto-setup")
                     self.logger.info(f"Created role '{name}' in guild '{guild.name}'")
                 except discord.Forbidden:
                     self.logger.warning(f"Missing permissions to create role '{name}' in '{guild.name}'")
                 except Exception as e:
                     self.logger.error(f"Error creating role '{name}' in '{guild.name}': {e}")
+
+    async def send_reward_dm(
+        self,
+        user: discord.abc.User,
+        guild: discord.Guild,
+        amount: int,
+        reason: str,
+        hearts_after: int | None = None,
+        channel: discord.abc.GuildChannel | None = None,
+        jump_url: str | None = None,
+    ):
+        # Compose a rich embed DM with channel and message links
+        try:
+            title = f"You earned +{amount}❤️"
+            desc_parts = [f"Reason: `{reason}`"]
+            if channel is not None:
+                # Channel mention (user can click it if they share the guild)
+                desc_parts.append(f"Channel: <#{channel.id}>")
+            if jump_url:
+                desc_parts.append(f"[Open message]({jump_url})")
+            description = "\n".join(desc_parts)
+
+            embed = discord.Embed(title=title, description=description, color=discord.Color.green())
+            embed.add_field(name="Server", value=f"**{guild.name}**", inline=True)
+            if hearts_after is not None:
+                embed.add_field(name="New total", value=f"**{hearts_after}❤️**", inline=True)
+            embed.set_footer(text="Discord Guardian • Keep it up ✨")
+            try:
+                if guild.icon:
+                    embed.set_thumbnail(url=guild.icon.url)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+            await user.send(embed=embed)
+        except discord.Forbidden:
+            # User has DMs closed; ignore silently
+            self.logger.debug(f"Cannot DM {getattr(user, 'name', 'user')} — DMs disabled")
+        except Exception as e:
+            self.logger.debug(f"Failed to DM reward notice: {e}")
 
     async def assign_role_for_hearts(self, member: discord.Member, hearts: int) -> str | None:
         target_name = role_for_hearts(hearts)
@@ -193,6 +244,19 @@ class GuardianClient(discord.Client):
                 await message.add_reaction("❤️")
             except Exception:
                 pass
+            # DM author about the reward
+            try:
+                await self.send_reward_dm(
+                    message.author,
+                    message.guild,
+                    delta_author,
+                    "Good advice",
+                    hearts_now,
+                    channel=message.channel if isinstance(message.channel, discord.abc.GuildChannel) else None,
+                    jump_url=getattr(message, "jump_url", None),
+                )
+            except Exception:
+                pass
         if helper_member and delta_helper:
             helper_key = f"{message.guild.id}:{helper_member.id}"
             store.get_or_create_user(helper_key, str(helper_member), cfg.heart_start, guild_id=str(message.guild.id))
@@ -203,6 +267,25 @@ class GuardianClient(discord.Client):
                 store.update_user(helper_key, {"role": role_name_h})
             try:
                 await message.add_reaction("✅")
+            except Exception:
+                pass
+            # DM helper about the reward
+            helper_reason_bits = []
+            if problem_solved:
+                helper_reason_bits.append("Problem solved")
+            if praise:
+                helper_reason_bits.append("Praise received")
+            helper_reason = ", ".join(helper_reason_bits) or "Contribution recognized"
+            try:
+                await self.send_reward_dm(
+                    helper_member,
+                    message.guild,
+                    delta_helper,
+                    helper_reason,
+                    helper_hearts,
+                    channel=message.channel if isinstance(message.channel, discord.abc.GuildChannel) else None,
+                    jump_url=getattr(message, "jump_url", None),
+                )
             except Exception:
                 pass
 
@@ -270,7 +353,7 @@ def main():
     @client.tree.command(name="award", description="Award hearts to a member (admin only)")
     @app_commands.describe(amount="Number of hearts to add")
     async def award_cmd(interaction: discord.Interaction, member: discord.Member, amount: int):
-        if not interaction.user.guild_permissions.manage_guild:
+        if not client.is_admin(interaction.user):
             return await interaction.response.send_message("You need Manage Server permission.", ephemeral=True)
         await interaction.response.defer()
         if interaction.guild is None:
@@ -286,11 +369,24 @@ def main():
         if role_name:
             store.update_user(user_key, {"role": role_name})
         await interaction.followup.send(f"Awarded {amount}❤️ to {member.mention}. Now {hearts_now}❤️.")
+        # DM member about the award
+        try:
+            await client.send_reward_dm(
+                member,
+                interaction.guild,
+                abs(int(amount)),
+                "Admin award",
+                hearts_now,
+                channel=interaction.channel if isinstance(interaction.channel, discord.abc.GuildChannel) else None,
+                jump_url=None,
+            )
+        except Exception:
+            pass
 
     @client.tree.command(name="penalize", description="Penalize hearts from a member (admin only)")
     @app_commands.describe(amount="Number of hearts to deduct")
     async def penalize_cmd(interaction: discord.Interaction, member: discord.Member, amount: int):
-        if not interaction.user.guild_permissions.manage_guild:
+        if not client.is_admin(interaction.user):
             return await interaction.response.send_message("You need Manage Server permission.", ephemeral=True)
         await interaction.response.defer()
         if interaction.guild is None:
