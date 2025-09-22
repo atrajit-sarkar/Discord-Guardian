@@ -97,14 +97,29 @@ class GuardianClient(discord.Client):
             for member in targets:
                 key = f"{guild.id}:{member.id}"
                 self.store.get_or_create_user(key, str(member), cfg.heart_start, guild_id=str(guild.id))
+                hearts_current: int | None = None
                 if isinstance(su.get("hearts"), (int, float)):
                     try:
-                        self.store.ensure_min_hearts(key, int(su["hearts"]))
+                        hearts_current = self.store.ensure_min_hearts(key, int(su["hearts"]))
                     except Exception as e:
                         self.logger.debug(f"Failed ensure_min_hearts for {member.id}: {e}")
+                if hearts_current is None:
+                    # Read current hearts
+                    try:
+                        hearts_current = self.store.get_user_hearts(key)
+                    except Exception:
+                        hearts_current = None
                 roles = su.get("roles")
                 if isinstance(roles, list) and roles:
                     await self.assign_configured_roles(member, roles)
+                # Assign level role based on hearts
+                if isinstance(hearts_current, int):
+                    role_name = await self.assign_role_for_hearts(member, hearts_current)
+                    if role_name:
+                        try:
+                            self.store.update_user(key, {"role": role_name})
+                        except Exception:
+                            pass
 
     async def assign_configured_roles(self, member: discord.Member, roles: list):
         guild = member.guild
@@ -179,6 +194,37 @@ class GuardianClient(discord.Client):
         except Exception as e:
             self.logger.debug(f"Failed to DM reward notice: {e}")
 
+    async def send_rank_change_dm(
+        self,
+        user: discord.abc.User,
+        guild: discord.Guild,
+        change: str,  # 'promotion' | 'demotion'
+        old_role: str | None,
+        new_role: str,
+        hearts: int,
+    ) -> None:
+        try:
+            if change == "promotion":
+                title = "Congratulations on your promotion!"
+                desc = (
+                    f"You've moved from {old_role or 'Unranked'} to **{new_role}**.\n"
+                    f"You're at **{hearts}❤️** — keep leading by example. Proud of you."
+                )
+                color = discord.Color.gold()
+            else:
+                title = "Keep your chin up"
+                desc = (
+                    f"You've moved from {old_role or 'Unranked'} to **{new_role}**.\n"
+                    f"You're at **{hearts}❤️** — take this as a nudge to be courteous. I believe in you."
+                )
+                color = discord.Color.orange()
+            embed = discord.Embed(title=title, description=desc, color=color)
+            embed.set_footer(text="Discord Guardian • A gentle reminder")
+            await user.send(embed=embed)
+        except Exception:
+            # Ignore DM failures
+            pass
+
     async def assign_role_for_hearts(self, member: discord.Member, hearts: int) -> str | None:
         target_name = role_for_hearts(hearts)
         guild = member.guild
@@ -191,9 +237,13 @@ class GuardianClient(discord.Client):
         if not target_role:
             self.logger.warning(f"Target role '{target_name}' still missing in guild '{guild.name}'")
             return None
+        # Determine previous level role (if any)
+        roles_order = ordered_roles()
+        known_names = set(roles_order)
+        current_level_roles = [r for r in member.roles if r.name in known_names]
+        old_role_name = current_level_roles[0].name if current_level_roles else None
         # Remove other roles from the set
-        known_names = set(ordered_roles())
-        roles_to_remove = [r for r in member.roles if r.name in known_names and r != target_role]
+        roles_to_remove = [r for r in current_level_roles if r != target_role]
         try:
             if roles_to_remove:
                 await member.remove_roles(*roles_to_remove, reason="Guardian role update")
@@ -203,6 +253,22 @@ class GuardianClient(discord.Client):
             self.logger.warning(f"Insufficient permissions to manage roles for {member.display_name}")
         except Exception as e:
             self.logger.error(f"Error assigning roles for {member.display_name}: {e}")
+        # DM on promotion/demotion
+        try:
+            if old_role_name != target_name:
+                # Determine change direction
+                if old_role_name is None:
+                    change = "promotion"
+                else:
+                    try:
+                        old_idx = roles_order.index(old_role_name)
+                        new_idx = roles_order.index(target_name)
+                        change = "promotion" if new_idx < old_idx else "demotion"
+                    except Exception:
+                        change = "promotion"
+                await self.send_rank_change_dm(member, guild, change, old_role_name, target_name, hearts)
+        except Exception:
+            pass
         return target_name
 
     async def maybe_kick(self, member: discord.Member, reason: str) -> bool:

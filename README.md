@@ -98,6 +98,15 @@ python -m guardian.main
 - Only positive heart changes (daily bonus, advice, solved, awards) are applied to them.
 - On startup, the bot ensures their hearts are at least the configured `hearts` value (if provided). Existing higher values are preserved and not overwritten.
 - If `roles` are specified for a special user, the bot will add those existing roles to the member on startup.
+- Specials are still promoted/demoted to the appropriate level roles based on their hearts (both on startup and when they gain hearts later).
+
+You can target individuals by `id` or entire roles by `roleId`:
+```json
+[
+  { "roleId": "987654321012345678", "hearts": 150, "roles": ["VIP"] },
+  { "id": "123456789012345678", "hearts": 200, "roles": ["VIP", "Helper"] }
+]
+```
 
 Example `specialuser.json`:
 ```json
